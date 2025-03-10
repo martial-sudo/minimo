@@ -146,6 +146,36 @@ class PowerManager:
         with self.resource_locks[resource]:
             self.active_resources[resource] = False
             self.logger.debug(f"Resource deactivated: {resource}")
+    
+    def disable_non_essential_services(self):
+        """Disable all non-essential services to save power during security mode."""
+        self.logger.info("Disabling non-essential services for security mode")
+        
+        # Keep only camera and minimal processing active
+        with self.resource_locks['audio_output']:
+            self.active_resources['audio_output'] = False
+        
+        # We can keep audio_input for wake word detection
+        # We need to keep the camera on for security
+        with self.resource_locks['camera']:
+            self.active_resources['camera'] = True
+        
+        # Keep display on but maybe at lower brightness
+        # In a real implementation, you might reduce display brightness
+        
+        # Put system into eco mode to save power
+        self.set_power_mode("eco")
+        
+    def enable_all_services(self):
+        """Re-enable all services when exiting security mode."""
+        self.logger.info("Re-enabling all services after security mode")
+        
+        # Reset power mode to normal
+        self.set_power_mode("normal")
+        
+        # All services can be activated as needed
+        # We don't automatically turn everything on, but make them available
+        # when requested through request_resource()
             
     def _monitor_system_resources(self):
         """Monitor system resources like CPU and memory usage."""

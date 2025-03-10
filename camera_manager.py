@@ -164,3 +164,10 @@ class CameraManager:
             
         logger.info(f"Security event recorded: {filename}")
         return filename
+    
+    def get_video_capture(self):
+        """
+        Return None to indicate that direct OpenCV capture should not be used.
+        Instead, security_mode should use the get_frame() method.
+        """
+        return None

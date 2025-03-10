@@ -52,15 +52,20 @@ class AssistantSystem:
         
         # Mode modules
         self.assistant = assistant_mode.AssistantMode(
-            self.command_queue, 
-            self.response_queue, 
+            self.audio_manager,
             self.camera_manager,
-            self.user_manager
+            self.face_display,
+            self.user_manager,
+            self.power_manager,
+            self.command_queue,
+            self.response_queue
         )
         self.security = security_mode.SecurityMode(
-            self.camera_manager, 
-            self.response_queue,
-            self.user_manager
+            self.audio_manager,
+            self.camera_manager,
+            self.face_display,
+            self.user_manager,
+            self.power_manager
         )
         
         # Threads
@@ -98,10 +103,7 @@ class AssistantSystem:
         self.threads.append(audio_thread)
         
         # Start the power manager
-        power_thread = threading.Thread(target=self.power_manager.run, args=(self.shutdown_event,))
-        power_thread.daemon = True
-        power_thread.start()
-        self.threads.append(power_thread)
+        self.power_manager.start()
         
         # Start the main loop in a separate thread
         main_thread = threading.Thread(target=self.main_loop)
@@ -124,38 +126,45 @@ class AssistantSystem:
                 # Check if in security mode
                 if self.is_night_time() and self.get_state() != SystemState.SECURITY:
                     self.set_state(SystemState.SECURITY)
-                    security_thread = threading.Thread(target=self.security.run, args=(self.shutdown_event,))
-                    security_thread.daemon = True
-                    security_thread.start()
-                    self.threads.append(security_thread)
+                    # Explicitly disable other functions and enable only camera
+                    self.security.start()
                     self.face_display.update_emotion("vigilant")
-                    self.response_queue.put("Switching to security mode for the night.")
+                    self.response_queue.put("Switching to security mode for the night. Camera active, other functions disabled.")
                 
                 # Check if should exit security mode
                 if not self.is_night_time() and self.get_state() == SystemState.SECURITY:
                     self.set_state(SystemState.IDLE)
+                    # Disable security mode and enable all functions again
+                    self.security.stop()
                     self.face_display.update_emotion("neutral")
-                    self.response_queue.put("Good morning! Switching to assistant mode.")
+                    self.response_queue.put("Good morning! Switching to assistant mode. All functions enabled.")
                 
-                # Process commands from audio manager
-                if not self.command_queue.empty():
-                    command = self.command_queue.get()
-                    
-                    if command.get("type") == "wake_word":
-                        # Wake word detected
-                        if self.get_state() != SystemState.SECURITY:
+                # Only process commands if not in security mode
+                if self.get_state() != SystemState.SECURITY:
+                    if not self.command_queue.empty():
+                        command = self.command_queue.get()
+                        
+                        if command.get("type") == "wake_word":
+                            # Wake word detected
                             self.set_state(SystemState.LISTENING)
                             self.face_display.update_emotion("attentive")
                             # Only now activate the camera for face recognition
                             self.camera_manager.start_capture()
                             # Start face recognition in a separate thread
                             threading.Thread(target=self.process_wake, args=(command,)).start()
-                    
-                    elif command.get("type") == "voice_command" and self.get_state() == SystemState.LISTENING:
-                        self.set_state(SystemState.PROCESSING)
-                        self.face_display.update_emotion("thinking")
-                        # Start command processing in a separate thread
-                        threading.Thread(target=self.process_command, args=(command,)).start()
+                        
+                        elif command.get("type") == "voice_command" and self.get_state() == SystemState.LISTENING:
+                            self.set_state(SystemState.PROCESSING)
+                            self.face_display.update_emotion("thinking")
+                            # Start command processing in a separate thread
+                            threading.Thread(target=self.process_command, args=(command,)).start()
+                else:
+                    # In security mode, only allow security-related wake word handling
+                    if not self.command_queue.empty():
+                        command = self.command_queue.get()
+                        if command.get("type") == "wake_word":
+                            # Handle wake word during security mode
+                            self.security.handle_wake_word_during_security(command)
                 
                 # Brief pause to prevent CPU hogging
                 time.sleep(0.1)
@@ -212,6 +221,10 @@ class AssistantSystem:
         
         # Signal modules to stop
         self.camera_manager.stop_capture()
+        
+        # Stop security mode if it's running
+        if self.get_state() == SystemState.SECURITY:
+            self.security.stop()
         
         # Wait for threads to finish
         for thread in self.threads:

@@ -7,21 +7,22 @@ from queue import Queue
 from vosk import Model, KaldiRecognizer
 
 class AssistantMode:
-    def __init__(self, audio_manager, camera_manager, face_display, user_manager, power_manager):
+    def __init__(self, audio_manager, camera_manager, face_display, user_manager, power_manager, command_queue=None, response_queue=None):
         """Initialize the day-time personal assistant mode."""
         self.audio_manager = audio_manager
         self.camera_manager = camera_manager
         self.face_display = face_display
         self.user_manager = user_manager
         self.power_manager = power_manager
-        self.command_queue = Queue()
+        self.command_queue = command_queue or Queue()
+        self.response_queue = response_queue
         self.running = False
         self.thread = None
         self.logger = logging.getLogger('assistant_mode')
         
         # Initialize Vosk model
         try:
-            self.model = Model("vosk-model-small-en-us-0.15")
+            self.model = Model(r"F:\desktop\minimo\modules\vosk-model-small-en-us-0.15")
             self.logger.info("Vosk model loaded successfully")
         except Exception as e:
             self.logger.error(f"Failed to load Vosk model: {e}")
@@ -69,6 +70,10 @@ class AssistantMode:
             else:
                 # Sleep to reduce CPU usage
                 time.sleep(0.1)
+    
+    def process_command(self, command_text):
+        """Process a voice command (for compatibility with main.py)."""
+        self.enqueue_command(command_text)
                 
     def process_audio_data(self, audio_data, sample_rate=16000):
         """Process audio data using Vosk model and detect commands."""
@@ -133,7 +138,10 @@ class AssistantMode:
         
         # Respond to the user
         self.face_display.set_emotion("talking")
-        self.audio_manager.speak(response)
+        if self.response_queue:
+            self.response_queue.put(response)
+        else:
+            self.audio_manager.speak(response)
         self.face_display.set_emotion("neutral")
         
     def _generate_response(self, command):
