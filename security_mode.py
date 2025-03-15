@@ -30,10 +30,21 @@ class SecurityMode:
         self.video_source = video_source
         self.cap = None
         self.background_subtractor = None
-        self.MIN_AREA = 5000  # Minimum area for motion to be considered an intruder
+        self.MIN_AREA = 5000  # Match the value from intruder_2.py
         self.intruder_detection_active = False
         self.intruder_thread = None
         self.display_video = False  # Option to display video feed for debugging
+        
+        # Video recording attributes
+        self.recording = False
+        self.video_writer = None
+        self.record_frames_buffer = []  # Buffer to store frames before detection
+        self.buffer_size = 50  # Number of frames to keep in buffer (about 5 seconds at 10 fps)
+        self.post_detection_frames = 100  # Number of frames to record after detection (about 10 seconds)
+        self.remaining_record_frames = 0
+        self.frame_rate = 10  # Frames per second for recordings
+        self.last_recording_time = 0  # To prevent excessive recordings
+        self.recording_cooldown = 30  # Seconds between recordings
         
         # Create recordings directory if it doesn't exist
         if not os.path.exists(self.recordings_dir):
@@ -76,6 +87,9 @@ class SecurityMode:
         """Stop the security mode thread."""
         self.running = False
         
+        # Stop any ongoing recording
+        self._stop_recording()
+        
         # Disable security mode in camera manager
         self.camera_manager.set_security_mode(False)
         self.camera_manager.stop_capture()  # Stop the camera when exiting security mode
@@ -116,16 +130,13 @@ class SecurityMode:
             # Adjust check interval based on security level
             if level == "low":
                 self.check_interval = 15
-                self.MIN_AREA = 8000  # Less sensitive
-                self.camera_manager.motion_threshold = 40  # Less sensitive
+                self.MIN_AREA = 8000  # Less sensitive (larger area required)
             elif level == "medium":
                 self.check_interval = 5
-                self.MIN_AREA = 5000  # Medium sensitivity
-                self.camera_manager.motion_threshold = 30  # Default sensitivity
+                self.MIN_AREA = 5000  # Medium sensitivity - same as intruder_2.py
             else:  # high
                 self.check_interval = 2
-                self.MIN_AREA = 3000  # More sensitive
-                self.camera_manager.motion_threshold = 20  # More sensitive
+                self.MIN_AREA = 3000  # More sensitive (smaller area needed)
             
             # Update intruder detection parameters if active
             if self.intruder_detection_active:
@@ -133,7 +144,6 @@ class SecurityMode:
     
     def restart_intruder_detection(self):
         """Helper method to restart intruder detection with new parameters"""
-        # Added new method to avoid duplicated code
         self.stop_intruder_detection()
         self.start_intruder_detection()
                 
@@ -157,7 +167,6 @@ class SecurityMode:
                 # Sleep to reduce CPU usage
                 time.sleep(0.1)
             except Exception as e:
-                # Added exception handling to prevent thread crashes
                 self.logger.error(f"Error in security mode main loop: {str(e)}")
                 time.sleep(1)  # Pause briefly before continuing
             
@@ -166,39 +175,24 @@ class SecurityMode:
         self.logger.debug("Performing security check")
         
         try:
-            # Check for motion by looking at the current frame and previous frames
+            # Get current frame
             frame = self.camera_manager.get_frame()
             
-            # Check if motion was detected
-            try:
-                motion_detected = hasattr(self.camera_manager, '_simulate_random_event') and \
-                                self.camera_manager._simulate_random_event(0.1)  # 10% chance
-            except AttributeError:
-                # If _simulate_random_event is not available, use random event
-                motion_detected = np.random.random() < 0.1
+            # Try to identify if anyone is present using face detection
+            faces = self.camera_manager.detect_faces()
             
-            if motion_detected:
-                self.logger.info("Motion detected during security check")
+            if faces:
+                user = self.user_manager.identify_user()
                 
-                # Try to identify if this is a known person using face detection
-                faces = self.camera_manager.detect_faces()
-                
-                if faces:
-                    user = self.user_manager.identify_user()
-                    
-                    if user:
-                        self.logger.info(f"Identified known user: {user['name']}")
-                        # Known user, just log and continue
-                        self.face_display.update_emotion("happy")
-                        self.audio_manager.speak(f"Good evening, {user['name']}")
-                    else:
-                        # Unknown person detected, escalate alert
-                        self._create_alert("unknown_person", frame)
+                if user:
+                    self.logger.info(f"Identified known user: {user['name']}")
+                    # Known user, just log and continue
+                    self.face_display.update_emotion("happy")
+                    self.audio_manager.speak(f"Good evening, {user['name']}")
                 else:
-                    # Motion but no face, could be an animal or object
-                    self._create_alert("unidentified_motion", frame)
+                    # Unknown person detected, escalate alert
+                    self._create_alert("unknown_person", frame)
         except Exception as e:
-            # Added error handling for security check
             self.logger.error(f"Error during security check: {str(e)}")
                 
     def _create_alert(self, alert_type, frame=None):
@@ -223,9 +217,9 @@ class SecurityMode:
             self.logger.error(f"Error creating alert: {str(e)}")
         
     def _capture_evidence(self, frame=None):
-        """Capture image/video evidence of the security event."""
+        """Capture image evidence of the security event."""
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filepath = f"{self.recordings_dir}/security_{timestamp}.txt"
+        filepath = f"{self.recordings_dir}/security_{timestamp}.jpg"
         
         try:
             # If no frame provided, try to get one from the camera manager
@@ -234,23 +228,21 @@ class SecurityMode:
             
             # Save frame as evidence if possible
             if frame is not None and isinstance(frame, np.ndarray):
-                # In a real system, we would save the actual image
-                # cv2.imwrite(f"{self.recordings_dir}/security_{timestamp}.jpg", frame)
-                
-                # For this demo, just write frame info to a text file
-                with open(filepath, "w") as f:
-                    f.write(f"Security event capture at {timestamp}\n")
-                    f.write(f"Frame shape: {frame.shape if hasattr(frame, 'shape') else 'Unknown'}\n")
-                    f.write(f"Frame type: {type(frame)}")
+                # Actually save the image using OpenCV
+                cv2.imwrite(filepath, frame)
+                self.logger.info(f"Evidence image captured: {filepath}")
             else:
-                with open(filepath, "w") as f:
+                error_txt = f"{self.recordings_dir}/security_{timestamp}_error.txt"
+                with open(error_txt, "w") as f:
                     f.write(f"Security event capture at {timestamp} - no valid frame available")
+                filepath = error_txt
                     
-            self.logger.info(f"Evidence captured: {filepath}")
         except Exception as e:
             self.logger.error(f"Error capturing evidence: {str(e)}")
-            with open(filepath, "w") as f:
+            error_txt = f"{self.recordings_dir}/security_{timestamp}_error.txt"
+            with open(error_txt, "w") as f:
                 f.write(f"Error capturing evidence at {timestamp}: {str(e)}")
+            filepath = error_txt
         
         return filepath
         
@@ -271,36 +263,12 @@ class SecurityMode:
                 # Could send notification to owner's phone here
                 # self._send_notification(alert)
                 
-            elif alert['type'] == "unidentified_motion":
-                # Medium priority alert - motion but no person identified
-                if self.security_level == "high":
-                    self.face_display.update_emotion("concerned")
-                    self.audio_manager.speak("Motion detected. Investigating.")
-                    
-                    # Already have camera on, just do a follow-up check
-                    time.sleep(2)  # Wait a moment before rechecking
-                    self._security_check()
-            
             elif alert['type'] == "intruder":
                 # Intruder alert from continuous monitoring
                 self.face_display.update_emotion("alarmed")
                 self.audio_manager.speak("Warning! Intruder detected! Security measures activated!")
                 
-                # Save evidence with timestamp
-                timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                file_path = f"{self.recordings_dir}/intruder_{timestamp}.txt"
-                
-                with open(file_path, "w") as f:
-                    f.write(f"Intruder detected at {timestamp}\n")
-                    if 'frame' in alert:
-                        f.write(f"Frame data available: {bool(alert['frame'])}")
-                    if 'image_path' in alert:
-                        f.write(f"\nEvidence stored at: {alert['image_path']}")
-                        
-                self.logger.info(f"Intruder evidence saved: {file_path}")
-                
-                # Could trigger alarm system, call security service, etc.
-                # self._trigger_alarm()
+                # Video recording is now handled by _start_recording() called from the intruder detection loop
                 
             elif alert['type'] == "unauthorized_access_attempt":
                 # Handle unauthorized access attempts
@@ -358,6 +326,9 @@ class SecurityMode:
         if self.intruder_detection_active:
             self.intruder_detection_active = False
             
+            # Stop any ongoing recording
+            self._stop_recording()
+            
             # Allow intruder thread to close properly
             if self.intruder_thread and self.intruder_thread.is_alive():
                 # Wait for thread to terminate, with timeout
@@ -382,25 +353,136 @@ class SecurityMode:
         except Exception as e:
             self.logger.error(f"Error releasing camera resources: {str(e)}")
             
+    def _start_recording(self, frame):
+        """Start recording video evidence when an intruder is detected."""
+        current_time = time.time()
+        
+        # Check if we're in cooldown period to prevent excessive recordings
+        if self.recording or (current_time - self.last_recording_time < self.recording_cooldown):
+            return
+            
+        try:
+            timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            video_path = f"{self.recordings_dir}/intruder_{timestamp}.mp4"
+            
+            # Determine frame size
+            if frame is not None and isinstance(frame, np.ndarray):
+                height, width = frame.shape[:2]
+            else:
+                # Default size if frame is invalid
+                width, height = 640, 480
+                
+            # Initialize video writer using MP4V codec
+            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Use MP4V codec
+            self.video_writer = cv2.VideoWriter(
+                video_path, fourcc, self.frame_rate, (width, height))
+                
+            if not self.video_writer.isOpened():
+                self.logger.error(f"Failed to open video writer for {video_path}")
+                return
+                
+            self.recording = True
+            self.remaining_record_frames = self.post_detection_frames
+            self.last_recording_time = current_time
+            
+            # Write buffered frames to include pre-detection footage
+            for buffered_frame in self.record_frames_buffer:
+                if buffered_frame is not None and isinstance(buffered_frame, np.ndarray):
+                    # Ensure frame has correct dimensions
+                    if buffered_frame.shape[:2] != (height, width):
+                        buffered_frame = cv2.resize(buffered_frame, (width, height))
+                    self.video_writer.write(buffered_frame)
+            
+            # Also save the current frame as a snapshot for thumbnails/preview
+            snapshot_path = f"{self.recordings_dir}/intruder_{timestamp}_snapshot.jpg"
+            cv2.imwrite(snapshot_path, frame)
+            
+            self.logger.info(f"Started video recording: {video_path}")
+            self.logger.info(f"Created snapshot: {snapshot_path}")
+            
+            # Create a metadata file with information about the detection
+            meta_path = f"{self.recordings_dir}/intruder_{timestamp}_info.txt"
+            with open(meta_path, "w") as f:
+                f.write(f"Intruder detected at {timestamp}\n")
+                f.write(f"Video evidence: {video_path}\n")
+                f.write(f"Snapshot: {snapshot_path}\n")
+                f.write(f"Security level: {self.security_level}\n")
+                f.write(f"Motion area threshold: {self.MIN_AREA}\n")
+                
+            return video_path
+        except Exception as e:
+            self.logger.error(f"Error starting video recording: {str(e)}")
+            self.recording = False
+            return None
+    
+    def _add_frame_to_buffer(self, frame):
+        """Add a frame to the rolling buffer for pre-detection recording."""
+        if frame is not None and isinstance(frame, np.ndarray):
+            # Create a copy to avoid reference issues
+            self.record_frames_buffer.append(frame.copy())
+            
+            # Keep buffer at fixed size
+            while len(self.record_frames_buffer) > self.buffer_size:
+                self.record_frames_buffer.pop(0)
+                
+    def _process_recording_frame(self, frame):
+        """Process a frame during recording - write to video file and update counters."""
+        if not self.recording or self.video_writer is None:
+            return
+            
+        try:
+            # Write frame to video
+            if frame is not None and isinstance(frame, np.ndarray):
+                self.video_writer.write(frame)
+                
+            # Decrement remaining frames counter
+            self.remaining_record_frames -= 1
+            
+            # Check if we should stop recording
+            if self.remaining_record_frames <= 0:
+                self._stop_recording()
+        except Exception as e:
+            self.logger.error(f"Error processing recording frame: {str(e)}")
+            self._stop_recording()  # Stop recording on error
+                
+    def _stop_recording(self):
+        """Stop the current video recording."""
+        if self.recording and self.video_writer is not None:
+            try:
+                self.video_writer.release()
+                self.logger.info("Video recording completed")
+            except Exception as e:
+                self.logger.error(f"Error closing video writer: {str(e)}")
+            finally:
+                self.video_writer = None
+                self.recording = False
+            
     def _run_intruder_detection(self):
         """Run intruder detection using OpenCV."""
         try:
-            # Initialize video capture
+            # Initialize video capture - match the approach from intruder_2.py
             if isinstance(self.video_source, str):
                 # Use a video file if specified
                 self.cap = cv2.VideoCapture(self.video_source)
+                if not self.cap.isOpened():
+                    self.logger.error("Error: Unable to access the video source.")
+                    return
             else:
                 # Get frames directly from camera_manager
                 self.cap = None
 
-            # Initialize background subtractor
+            # Initialize background subtractor with the same parameters as intruder_2.py
             self.background_subtractor = cv2.createBackgroundSubtractorMOG2(
                 history=500, varThreshold=25, detectShadows=True)
+            
+            # Clear the frame buffer at startup
+            self.record_frames_buffer = []
             
             self.logger.info(f"Intruder detection running with min area: {self.MIN_AREA}")
             
             consecutive_errors = 0
             max_consecutive_errors = 5
+            last_intruder_detected = False
             
             while self.intruder_detection_active:
                 try:
@@ -434,14 +516,20 @@ class SecurityMode:
                     
                     # Reset error counter on successful frame acquisition
                     consecutive_errors = 0
+                    
+                    # Add frame to buffer for pre-detection recording
+                    self._add_frame_to_buffer(frame)
 
-                    # Resize frame for faster processing
+                    # Resize frame for faster processing - match intruder_2.py
                     frame_resized = cv2.resize(frame, (640, 480))
+                    
+                    # Create a copy for annotation that we'll use for recording
+                    frame_annotated = frame_resized.copy()
 
                     # Apply background subtraction
                     mask = self.background_subtractor.apply(frame_resized)
 
-                    # Remove noise (morphological operations)
+                    # Remove noise with same morphological operations as intruder_2.py
                     mask = cv2.morphologyEx(mask, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
                     mask = cv2.dilate(mask, None, iterations=2)
 
@@ -451,27 +539,55 @@ class SecurityMode:
                     intruder_detected = False
 
                     for contour in contours:
+                        # Use exact same area threshold as intruder_2.py
                         if cv2.contourArea(contour) < self.MIN_AREA:
                             continue
 
                         # Draw bounding box around the motion
                         x, y, w, h = cv2.boundingRect(contour)
-                        cv2.rectangle(frame_resized, (x, y), (x + w, y + h), (0, 0, 255), 2)
+                        cv2.rectangle(frame_annotated, (x, y), (x + w, y + h), (0, 0, 255), 2)
                         intruder_detected = True
+                    
+                    # Add current timestamp to frame
+                    current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+                    cv2.putText(frame_annotated, current_time, (10, 30), 
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 2)
 
-                    # If intruder detected, create an alert
-                    if intruder_detected:
+                    # Handle recording if we're already recording
+                    if self.recording:
+                        # Add "RECORDING" text
+                        cv2.putText(frame_annotated, "RECORDING", (frame_annotated.shape[1] - 150, 30), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 0, 255), 2)
+                        
+                        # Process frame for ongoing recording
+                        self._process_recording_frame(frame_annotated)
+                    
+                    # Only create alert and start recording if intruder is newly detected
+                    if intruder_detected and not last_intruder_detected and not self.recording:
                         # Add alert text to frame
                         alert_text = "Intruder Detected!"
-                        cv2.putText(frame_resized, alert_text, (10, 50), cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
+                        cv2.putText(frame_annotated, alert_text, (10, 60), 
+                                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 0, 255), 3)
                         self.logger.warning(f"{datetime.datetime.now()}: Intruder Alert!")
                         
-                        # Create an intruder alert with standardized format
-                        self._create_alert("intruder", frame_resized)
+                        # Create an intruder alert
+                        self._create_alert("intruder", frame_annotated)
                         
-                        # Only display video when intruder is detected
-                        if self.display_video:
-                            cv2.imshow("CCTV Intruder Detection", frame_resized)
+                        # Start recording video evidence
+                        video_path = self._start_recording(frame_annotated)
+                        
+                    # Update last detection state
+                    last_intruder_detected = intruder_detected
+                    
+                    # Display video if enabled
+                    if self.display_video:
+                        # Show a status message on the display frame
+                        status_text = "RECORDING" if self.recording else "Monitoring"
+                        cv2.putText(frame_annotated, status_text, (frame_annotated.shape[1] - 150, 30), 
+                                  cv2.FONT_HERSHEY_SIMPLEX, 0.7, 
+                                  (0, 0, 255) if self.recording else (0, 255, 0), 2)
+                        
+                        cv2.imshow("CCTV Intruder Detection", frame_annotated)
 
                     # Break loop on 'q' key press
                     if self.display_video and cv2.waitKey(1) & 0xFF == ord('q'):
@@ -491,6 +607,9 @@ class SecurityMode:
         except Exception as e:
             self.logger.error(f"Critical error in intruder detection: {str(e)}")
         finally:
+            # Stop recording if still active
+            self._stop_recording()
+            
             # Release resources
             self._release_camera_resources()
             self.intruder_detection_active = False

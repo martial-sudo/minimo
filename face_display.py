@@ -254,6 +254,7 @@ class FaceDisplay:
         self.blink_state = True
         self.blink_counter = 0
         logger.debug("Face blinked")
+
     
     def _animate_speaking(self, text):
         """Animate the face speaking the given text"""
