@@ -6,6 +6,7 @@ from queue import Queue
 import os
 import cv2
 import numpy as np
+import gc
 
 class SecurityMode:
     def __init__(self, audio_manager, camera_manager, face_display, user_manager, power_manager, ip_camera_url):
@@ -25,6 +26,8 @@ class SecurityMode:
         self.logger = logging.getLogger('security_mode')
         self.recordings_dir = "security_recordings"
         self.shutdown_event = threading.Event()
+        
+        self.display_video = False  # Disable video display on headless Pi
 
         self.ip_camera_url = ip_camera_url  # IP camera URL
         
@@ -44,7 +47,7 @@ class SecurityMode:
         self.buffer_size = 50  # Number of frames to keep in buffer (about 5 seconds at 10 fps)
         self.post_detection_frames = 100  # Number of frames to record after detection (about 10 seconds)
         self.remaining_record_frames = 0
-        self.frame_rate = 10  # Frames per second for recordings
+        self.frame_rate = 5  # Frames per second for recordings
         self.last_recording_time = 0  # To prevent excessive recordings
         self.recording_cooldown = 30  # Seconds between recordings
         
@@ -365,7 +368,7 @@ class SecurityMode:
             
         try:
             timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-            video_path = f"{self.recordings_dir}/intruder_{timestamp}.mp4"
+            video_path = f"{self.recordings_dir}/intruder_{timestamp}.avi"
             
             # Determine frame size
             if frame is not None and isinstance(frame, np.ndarray):
@@ -375,7 +378,7 @@ class SecurityMode:
                 width, height = 640, 480
                 
             # Initialize video writer using MP4V codec
-            fourcc = cv2.VideoWriter_fourcc(*'mp4v')  # Use MP4V codec
+            fourcc = cv2.VideoWriter_fourcc(*'XVID')  # Use MP4V codec
             self.video_writer = cv2.VideoWriter(
                 video_path, fourcc, self.frame_rate, (width, height))
                 
@@ -458,6 +461,9 @@ class SecurityMode:
             finally:
                 self.video_writer = None
                 self.recording = False
+                # Add to the end of _stop_recording
+                cv2.destroyAllWindows()
+                gc.collect()  # Force garbage collection
             
     def _run_intruder_detection(self):
         """Run intruder detection using OpenCV."""
@@ -474,8 +480,7 @@ class SecurityMode:
                 self.cap = None
 
             # Initialize background subtractor with the same parameters as intruder_2.py
-            self.background_subtractor = cv2.createBackgroundSubtractorMOG2(
-                history=500, varThreshold=25, detectShadows=True)
+            self.background_subtractor = cv2.createBackgroundSubtractorKNN(detectShadows=False)
             
             # Clear the frame buffer at startup
             self.record_frames_buffer = []
@@ -523,7 +528,7 @@ class SecurityMode:
                     self._add_frame_to_buffer(frame)
 
                     # Resize frame for faster processing - match intruder_2.py
-                    frame_resized = cv2.resize(frame, (640, 480))
+                    frame_resized = cv2.resize(frame, (320, 240))
                     
                     # Create a copy for annotation that we'll use for recording
                     frame_annotated = frame_resized.copy()

@@ -431,272 +431,280 @@ class CameraManager:
             
             self.last_frame = self.current_frame.copy()
 
-def _record_security_event(self):
-    event_time = datetime.now().strftime("%Y%m%d_%H%M%S")
-    
-    if not self.recording_active:
-        self._start_recording(event_time)
-    
-    faces = self.detect_faces()
-    face_detected = len(faces) > 0
-    
-    recognized_faces = []
-    for face in faces:
-        if "recognized_id" in face:
-            recognized_faces.append(face["recognized_id"])
-    
-    img_filename = f"{self.recordings_dir}/security_event_{event_time}.jpg"
-    if self.current_frame is not None:
-        cv2.imwrite(img_filename, self.current_frame)
+    def _record_security_event(self):
+        event_time = datetime.now().strftime("%Y%m%d_%H%M%S")
         
-    log_filename = f"{self.recordings_dir}/security_event_{event_time}.txt"
-    with open(log_filename, "w") as f:
-        event_details = {
+        if not self.recording_active:
+            self._start_recording(event_time)
+        
+        faces = self.detect_faces()
+        face_detected = len(faces) > 0
+        
+        recognized_faces = []
+        for face in faces:
+            if "recognized_id" in face:
+                recognized_faces.append(face["recognized_id"])
+        
+        img_filename = f"{self.recordings_dir}/security_event_{event_time}.jpg"
+        if self.current_frame is not None:
+            cv2.imwrite(img_filename, self.current_frame)
+            
+        log_filename = f"{self.recordings_dir}/security_event_{event_time}.txt"
+        with open(log_filename, "w") as f:
+            event_details = {
+                "timestamp": datetime.now().isoformat(),
+                "face_detected": face_detected,
+                "num_faces": len(faces) if face_detected else 0,
+                "recognized_faces": recognized_faces,
+                "camera_type": self.active_camera_type,
+                "image_file": img_filename,
+                "recording_filename": f"security_video_{event_time}.mp4" if self.recording_active else None
+            }
+            f.write(str(event_details))
+            
+        self.trigger_event("security_event", {
             "timestamp": datetime.now().isoformat(),
             "face_detected": face_detected,
             "num_faces": len(faces) if face_detected else 0,
             "recognized_faces": recognized_faces,
             "camera_type": self.active_camera_type,
             "image_file": img_filename,
-            "recording_filename": f"security_video_{event_time}.mp4" if self.recording_active else None
-        }
-        f.write(str(event_details))
-        
-    self.trigger_event("security_event", {
-        "timestamp": datetime.now().isoformat(),
-        "face_detected": face_detected,
-        "num_faces": len(faces) if face_detected else 0,
-        "recognized_faces": recognized_faces,
-        "camera_type": self.active_camera_type,
-        "image_file": img_filename,
-        "log_file": log_filename
-    })
-    
-    return log_filename
-
-def _start_recording(self, timestamp):
-    if self.recording_active:
-        return
-        
-    video_filename = f"{self.recordings_dir}/security_video_{timestamp}.mp4"
-    
-    fourcc = cv2.VideoWriter_fourcc(*'mp4v')
-    
-    if self.current_frame is not None:
-        h, w = self.current_frame.shape[:2]
-        self.video_writer = cv2.VideoWriter(
-            video_filename, 
-            fourcc, 
-            10.0,
-            (w, h)
-        )
-        
-        self.recording_active = True
-        self.recording_start_time = time.time()
-        logger.info(f"Started security recording: {video_filename}")
-        
-        self.trigger_event("recording_started", {
-            "filename": video_filename,
-            "camera_type": self.active_camera_type
+            "log_file": log_filename
         })
+        
+        return log_filename
 
-def _stop_recording(self):
-    if not self.recording_active:
-        return
+    def _start_recording(self, timestamp):
+        if self.recording_active:
+            return
+            
+        video_filename = f"{self.recordings_dir}/security_video_{timestamp}.mp4"
         
-    if self.video_writer:
-        self.video_writer.release()
-        self.video_writer = None
+        fourcc = cv2.VideoWriter_fourcc(*'mp4v')
         
-    duration = time.time() - self.recording_start_time
-    logger.info(f"Stopped security recording after {duration:.2f} seconds")
-    self.recording_active = False
-    
-    self.trigger_event("recording_stopped", {"duration": duration})
-    
-def get_frame(self):
-    with self.frame_lock:
         if self.current_frame is not None:
-            if self.capture_timeout:
-                self.last_activity_time = time.time()
-            return self.current_frame.copy()
-        return None
-
-def take_photo(self, filename=None):
-    if filename is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        camera_type = self.active_camera_type or "cam"
-        filename = f"photo_{camera_type}_{timestamp}.jpg"
-    
-    frame = self.get_frame()
-    
-    if frame is not None:
-        cv2.imwrite(filename, frame)
-        logger.info(f"Photo saved: {filename}")
-        self.trigger_event("photo_taken", {
-            "filename": filename,
-            "camera_type": self.active_camera_type
-        })
-        return filename
-    
-    logger.error("Failed to take photo: No frame available")
-    self.trigger_event("camera_error", {"error": "Failed to take photo"})
-    return None
-
-def set_security_mode(self, enabled, camera_type=None):
-    # If camera_type is specified and different from current active camera,
-    # switch to that camera for security mode
-    if camera_type and camera_type != self.active_camera_type:
-        if camera_type == "webcam":
-            if not self._initialize_webcam():
-                logger.error("Failed to initialize webcam for security mode")
-                return False
-        elif camera_type == "rpi":
-            if not self.activate_rpi_camera():
-                logger.error("Failed to initialize RPi camera for security mode")
-                return False
-        elif camera_type == "ip" and self.ip_camera_url:
-            if not self.activate_ip_camera(self.ip_camera_url):
-                logger.error("Failed to initialize IP camera for security mode")
-                return False
-        else:
-            logger.error(f"Invalid camera type for security mode: {camera_type}")
-            return False
-    
-    self.security_mode = enabled
-    logger.info(f"Security mode {'enabled' if enabled else 'disabled'} using {self.active_camera_type} camera")
-    
-    if enabled and self.current_frame is not None:
-        with self.frame_lock:
-            self.last_frame = self.current_frame.copy()
+            h, w = self.current_frame.shape[:2]
+            self.video_writer = cv2.VideoWriter(
+                video_filename, 
+                fourcc, 
+                10.0,
+                (w, h)
+            )
             
-    if enabled:
-        self.set_night_mode(True)
-        
-        # Make sure we're capturing if not already
-        if not self.capturing:
-            self.start_capture()
+            self.recording_active = True
+            self.recording_start_time = time.time()
+            logger.info(f"Started security recording: {video_filename}")
             
-    self.trigger_event("security_mode_changed", {
-        "enabled": enabled,
-        "camera_type": self.active_camera_type
-    })
-    
-    return True
-
-def set_ip_camera_url(self, url):
-    """Set IP camera URL for later activation"""
-    self.ip_camera_url = url
-    logger.info(f"IP camera URL set to: {url}")
-    return True
-
-def get_camera_status(self):
-    return {
-        "active": self.capturing,
-        "camera_type": self.active_camera_type,
-        "security_mode": self.security_mode,
-        "night_mode": self.night_mode_enabled,
-        "brightness": self.brightness,
-        "recording": self.recording_active,
-        "last_frame_time": self.last_frame_time,
-        "resolution": self.resolution,
-        "rotation": self.rotation,
-        "ip_camera_url": self.ip_camera_url if self.active_camera_type == "ip" else None
-    }
-
-def detect_faces(self, frame=None):
-    if frame is None:
-        frame = self.get_frame()
-        
-    if frame is None:
-        return []
-    
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-    results = self.face_detection.process(rgb_frame)
-    
-    face_detections = []
-    
-    if results.detections:
-        h, w, _ = frame.shape
-        
-        for detection in results.detections:
-            bbox = detection.location_data.relative_bounding_box
-            
-            x = int(bbox.xmin * w)
-            y = int(bbox.ymin * h)
-            width = int(bbox.width * w)
-            height = int(bbox.height * h)
-            
-            landmarks = {}
-            for idx, landmark in enumerate(detection.location_data.relative_keypoints):
-                landmarks[f"point_{idx}"] = {
-                    "x": int(landmark.x * w),
-                    "y": int(landmark.y * h)
-                }
-            
-            face_detections.append({
-                "x": x,
-                "y": y,
-                "width": width,
-                "height": height,
-                "confidence": detection.score[0],
-                "landmarks": landmarks
-            })
-            
-        if face_detections:
-            self.trigger_event("faces_detected", {
-                "count": len(face_detections),
+            self.trigger_event("recording_started", {
+                "filename": video_filename,
                 "camera_type": self.active_camera_type
             })
+
+    def _stop_recording(self):
+        if not self.recording_active:
+            return
             
-            # For each detected face, attempt to recognize it
-            for face in face_detections:
-                face_id = self.recognize_face(frame, face)
-                if face_id:
-                    face["recognized_id"] = face_id
+        if self.video_writer:
+            self.video_writer.release()
+            self.video_writer = None
+            
+        duration = time.time() - self.recording_start_time
+        logger.info(f"Stopped security recording after {duration:.2f} seconds")
+        self.recording_active = False
+        
+        self.trigger_event("recording_stopped", {"duration": duration})
+        
+    def get_frame(self):
+        with self.frame_lock:
+            if self.current_frame is not None:
+                if self.capture_timeout:
+                    self.last_activity_time = time.time()
+                return self.current_frame.copy()
+            return None
+
+    def take_photo(self, filename=None):
+        if filename is None:
+            timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+            camera_type = self.active_camera_type or "cam"
+            filename = f"photo_{camera_type}_{timestamp}.jpg"
+        
+        frame = self.get_frame()
+        
+        if frame is not None:
+            cv2.imwrite(filename, frame)
+            logger.info(f"Photo saved: {filename}")
+            self.trigger_event("photo_taken", {
+                "filename": filename,
+                "camera_type": self.active_camera_type
+            })
+            return filename
+        
+        logger.error("Failed to take photo: No frame available")
+        self.trigger_event("camera_error", {"error": "Failed to take photo"})
+        return None
+
+    def set_security_mode(self, enabled, camera_type=None):
+        # If camera_type is specified and different from current active camera,
+        # switch to that camera for security mode
+        if camera_type and camera_type != self.active_camera_type:
+            if camera_type == "webcam":
+                if not self._initialize_webcam():
+                    logger.error("Failed to initialize webcam for security mode")
+                    return False
+            elif camera_type == "rpi":
+                if not self.activate_rpi_camera():
+                    logger.error("Failed to initialize RPi camera for security mode")
+                    return False
+            elif camera_type == "ip" and self.ip_camera_url:
+                if not self.activate_ip_camera(self.ip_camera_url):
+                    logger.error("Failed to initialize IP camera for security mode")
+                    return False
+            else:
+                logger.error(f"Invalid camera type for security mode: {camera_type}")
+                return False
+        
+        self.security_mode = enabled
+        logger.info(f"Security mode {'enabled' if enabled else 'disabled'} using {self.active_camera_type} camera")
+        
+        if enabled and self.current_frame is not None:
+            with self.frame_lock:
+                self.last_frame = self.current_frame.copy()
                 
-    return face_detections
+        if enabled:
+            self.set_night_mode(True)
+            
+            # Make sure we're capturing if not already
+            if not self.capturing:
+                self.start_capture()
+                
+        self.trigger_event("security_mode_changed", {
+            "enabled": enabled,
+            "camera_type": self.active_camera_type
+        })
+        
+        return True
+    
 
-def __del__(self):
-    self.stop_capture()
-    
-    if hasattr(self, 'face_db_conn') and self.face_db_conn:
-        self.face_db_conn.close()
+    def set_night_mode(self, enable):
+        """Enable or disable night mode (lower brightness, adjust contrast)."""
+        self.night_mode_enabled = enable
+        if enable:
+            logging.info("Night mode activated.")
+        else:
+            logging.info("Night mode deactivated.")
 
-"""# Example usage function
-def example_usage():
-    """
-   """ Example of how to use the CameraManager class with different camera types"""
-    """
-    # Initialize the camera manager with default settings
-    camera = CameraManager(resolution=(640, 480), rotation=0, power_save_mode=True)
-    
-    # Define a simple callback for motion detection
-    def motion_callback(event_data):
-        print(f"Motion detected! Event data: {event_data}")
-    
-    # Register event handlers
-    camera.register_event_handler("motion_detected", motion_callback)
-    camera.register_event_handler("security_event", lambda data: print(f"Security event: {data}"))
-    camera.register_event_handler("face_recognized", lambda data: print(f"Face recognized: {data['name']}"))
-    
-    # Example 1: Use default webcam
-    camera.start_capture(camera_type="webcam")
-    time.sleep(5)  # Run for 5 seconds
-    
-    # Example 2: Switch to Raspberry Pi camera for security mode
-    camera.stop_capture()
-    camera.set_security_mode(True, camera_type="rpi")
-    time.sleep(10)  # Run security mode for 10 seconds
-    
-    # Example 3: Use IP camera with custom URL
-    camera.stop_capture()
-    camera.set_ip_camera_url("rtsp://username:password@192.168.1.100:554/stream")
-    camera.start_capture(camera_type="ip")
-    time.sleep(5)  # Run for 5 seconds
-    
-    # Clean up
-    camera.stop_capture()"""
+
+    def set_ip_camera_url(self, url):
+        """Set IP camera URL for later activation"""
+        self.ip_camera_url = url
+        logger.info(f"IP camera URL set to: {url}")
+        return True
+
+    def get_camera_status(self):
+        return {
+            "active": self.capturing,
+            "camera_type": self.active_camera_type,
+            "security_mode": self.security_mode,
+            "night_mode": self.night_mode_enabled,
+            "brightness": self.brightness,
+            "recording": self.recording_active,
+            "last_frame_time": self.last_frame_time,
+            "resolution": self.resolution,
+            "rotation": self.rotation,
+            "ip_camera_url": self.ip_camera_url if self.active_camera_type == "ip" else None
+        }
+
+    def detect_faces(self, frame=None):
+        if frame is None:
+            frame = self.get_frame()
+            
+        if frame is None:
+            return []
+        
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        results = self.face_detection.process(rgb_frame)
+        
+        face_detections = []
+        
+        if results.detections:
+            h, w, _ = frame.shape
+            
+            for detection in results.detections:
+                bbox = detection.location_data.relative_bounding_box
+                
+                x = int(bbox.xmin * w)
+                y = int(bbox.ymin * h)
+                width = int(bbox.width * w)
+                height = int(bbox.height * h)
+                
+                landmarks = {}
+                for idx, landmark in enumerate(detection.location_data.relative_keypoints):
+                    landmarks[f"point_{idx}"] = {
+                        "x": int(landmark.x * w),
+                        "y": int(landmark.y * h)
+                    }
+                
+                face_detections.append({
+                    "x": x,
+                    "y": y,
+                    "width": width,
+                    "height": height,
+                    "confidence": detection.score[0],
+                    "landmarks": landmarks
+                })
+                
+            if face_detections:
+                self.trigger_event("faces_detected", {
+                    "count": len(face_detections),
+                    "camera_type": self.active_camera_type
+                })
+                
+                # For each detected face, attempt to recognize it
+                for face in face_detections:
+                    face_id = self.recognize_face(frame, face)
+                    if face_id:
+                        face["recognized_id"] = face_id
+                    
+        return face_detections
+
+    def __del__(self):
+        self.stop_capture()
+        
+        if hasattr(self, 'face_db_conn') and self.face_db_conn:
+            self.face_db_conn.close()
+
+    """# Example usage function
+    def example_usage():
+    Example of how to use the CameraManager class with different camera types
+        # Initialize the camera manager with default settings
+        camera = CameraManager(resolution=(640, 480), rotation=0, power_save_mode=True)
+        
+        # Define a simple callback for motion detection
+        def motion_callback(event_data):
+            print(f"Motion detected! Event data: {event_data}")
+        
+        # Register event handlers
+        camera.register_event_handler("motion_detected", motion_callback)
+        camera.register_event_handler("security_event", lambda data: print(f"Security event: {data}"))
+        camera.register_event_handler("face_recognized", lambda data: print(f"Face recognized: {data['name']}"))
+        
+        # Example 1: Use default webcam
+        camera.start_capture(camera_type="webcam")
+        time.sleep(5)  # Run for 5 seconds
+        
+        # Example 2: Switch to Raspberry Pi camera for security mode
+        camera.stop_capture()
+        camera.set_security_mode(True, camera_type="rpi")
+        time.sleep(10)  # Run security mode for 10 seconds
+        
+        # Example 3: Use IP camera with custom URL
+        camera.stop_capture()
+        camera.set_ip_camera_url("rtsp://username:password@192.168.1.100:554/stream")
+        camera.start_capture(camera_type="ip")
+        time.sleep(5)  # Run for 5 seconds
+        
+        # Clean up
+        camera.stop_capture()"""
 
 if __name__ == "__main__":
     # Configure logging
@@ -706,4 +714,4 @@ if __name__ == "__main__":
     )
     
     # Run the example
-    example_usage()
+    #example_usage()

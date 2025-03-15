@@ -7,6 +7,8 @@ import threading
 import cv2
 import numpy as np
 import face_recognition
+import sqlite3
+import pickle
 
 logger = logging.getLogger(__name__)
 
@@ -14,61 +16,86 @@ class UserManager:
     def __init__(self, camera_manager):
         logger.info("Initializing User Manager")
         self.camera_manager = camera_manager
-        self.users_file = "users.json"
-        self.users = []
-        self.user_lock = threading.Lock()
         self.face_data_dir = "face_data"
+        self.db_path = "assistant_data.db"
+        self.user_lock = threading.Lock()
         
         # Ensure face data directory exists
         if not os.path.exists(self.face_data_dir):
             os.makedirs(self.face_data_dir)
             
-        # Load existing users
-        self.load_users()
+        # Initialize database
+        self._init_database()
         
         # Face recognition parameters
         self.face_match_threshold = 0.6  # Lower is more strict
     
-    def load_users(self):
-        """Load user data from storage"""
+    def _init_database(self):
+        """Initialize SQLite database with required tables"""
         try:
-            if os.path.exists(self.users_file):
-                with open(self.users_file, 'r') as f:
-                    self.users = json.load(f)
-                
-                # Load face encodings for each user
-                for user in self.users:
-                    encoding_file = os.path.join(self.face_data_dir, f"user_{user['id']}_encoding.npy")
-                    if os.path.exists(encoding_file):
-                        user['face_encoding'] = np.load(encoding_file)
-                    else:
-                        logger.warning(f"Face encoding not found for user {user['name']}")
-                
-                logger.info(f"Loaded {len(self.users)} users")
-            else:
-                self.users = []
-                logger.info("No existing users found")
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Create users table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                created REAL NOT NULL,
+                last_seen REAL NOT NULL,
+                face_encoding BLOB
+            )
+            ''')
+            
+            # Create conversation_logs table
+            cursor.execute('''
+            CREATE TABLE IF NOT EXISTS conversation_logs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                user_id INTEGER,
+                timestamp REAL NOT NULL,
+                command TEXT NOT NULL,
+                response TEXT NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users (id)
+            )
+            ''')
+            
+            conn.commit()
+            conn.close()
+            logger.info("Database initialized successfully")
         except Exception as e:
-            logger.error(f"Error loading users: {e}")
-            self.users = []
+            logger.error(f"Error initializing database: {e}")
     
-    def save_users(self):
-        """Save user data to storage"""
+    def get_users(self):
+        """Load user data from database"""
+        users = []
         try:
-            with self.user_lock:
-                # Create a copy of users without the face_encoding field for JSON serialization
-                users_to_save = []
-                for user in self.users:
-                    user_copy = user.copy()
-                    if 'face_encoding' in user_copy:
-                        del user_copy['face_encoding']
-                    users_to_save.append(user_copy)
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT id, name, created, last_seen, face_encoding FROM users")
+            rows = cursor.fetchall()
+            
+            for row in rows:
+                user_id, name, created, last_seen, face_encoding_blob = row
                 
-                with open(self.users_file, 'w') as f:
-                    json.dump(users_to_save, f)
-            logger.info(f"Saved {len(self.users)} users")
+                user = {
+                    "id": user_id,
+                    "name": name,
+                    "created": created,
+                    "last_seen": last_seen,
+                }
+                
+                if face_encoding_blob:
+                    user['face_encoding'] = pickle.loads(face_encoding_blob)
+                
+                users.append(user)
+            
+            conn.close()
+            logger.info(f"Loaded {len(users)} users from database")
         except Exception as e:
-            logger.error(f"Error saving users: {e}")
+            logger.error(f"Error loading users from database: {e}")
+        
+        return users
     
     def identify_user(self):
         """Identify a user from camera input using facial recognition"""
@@ -99,10 +126,13 @@ class UserManager:
         # Get face encodings for any faces in the frame
         face_encodings = face_recognition.face_encodings(rgb_small_frame, face_locations)
         
+        # Get all users from database
+        users = self.get_users()
+        
         # Try to match with known users
         for face_encoding in face_encodings:
             matches = []
-            for user in self.users:
+            for user in users:
                 if 'face_encoding' in user:
                     # Compare face with stored user face data
                     match = face_recognition.compare_faces(
@@ -124,9 +154,18 @@ class UserManager:
                 confidence = matches[0][1]
                 logger.info(f"Recognized user: {recognized_user['name']} with confidence: {confidence:.2f}")
                 
-                # Update last seen timestamp
-                recognized_user['last_seen'] = time.time()
-                self.save_users()
+                # Update last seen timestamp in database
+                try:
+                    conn = sqlite3.connect(self.db_path)
+                    cursor = conn.cursor()
+                    cursor.execute(
+                        "UPDATE users SET last_seen = ? WHERE id = ?", 
+                        (time.time(), recognized_user['id'])
+                    )
+                    conn.commit()
+                    conn.close()
+                except Exception as e:
+                    logger.error(f"Error updating last_seen timestamp: {e}")
                 
                 return recognized_user
         
@@ -165,103 +204,147 @@ class UserManager:
         # Extract face encoding for the detected face
         face_encoding = face_recognition.face_encodings(rgb_frame, face_locations)[0]
         
-        # Create a new user with the face encoding
-        with self.user_lock:
-            user_id = len(self.users) + 1 if self.users else 1
+        # Check for duplicate names
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT id FROM users WHERE name = ?", (name,))
+            if cursor.fetchone():
+                logger.warning(f"User with name '{name}' already exists")
+                conn.close()
+                return False
             
-            # Check for duplicate names
-            for user in self.users:
-                if user["name"].lower() == name.lower():
-                    logger.warning(f"User with name '{name}' already exists")
-                    return False
+            # Insert new user into database
+            current_time = time.time()
+            cursor.execute(
+                "INSERT INTO users (name, created, last_seen, face_encoding) VALUES (?, ?, ?, ?)",
+                (name, current_time, current_time, pickle.dumps(face_encoding))
+            )
+            user_id = cursor.lastrowid
+            conn.commit()
+            conn.close()
             
-            # Create the new user
-            new_user = {
-                "id": user_id,
-                "name": name,
-                "created": time.time(),
-                "last_seen": time.time(),
-                "face_encoding": face_encoding
-            }
-            self.users.append(new_user)
-        
-        # Save face encoding to file
-        encoding_file = os.path.join(self.face_data_dir, f"user_{user_id}_encoding.npy")
-        np.save(encoding_file, face_encoding)
-        
-        # Save user image for reference (optional)
-        face_top, face_right, face_bottom, face_left = face_locations[0]
-        face_image = frame[face_top:face_bottom, face_left:face_right]
-        cv2.imwrite(os.path.join(self.face_data_dir, f"user_{user_id}.jpg"), face_image)
-        
-        # Save updated user list
-        self.save_users()
-        logger.info(f"User {name} added successfully with ID {user_id}")
-        return True
+            # Save user image for reference (optional)
+            face_top, face_right, face_bottom, face_left = face_locations[0]
+            face_image = frame[face_top:face_bottom, face_left:face_right]
+            cv2.imwrite(os.path.join(self.face_data_dir, f"user_{user_id}.jpg"), face_image)
+            
+            logger.info(f"User {name} added successfully with ID {user_id}")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error adding new user: {e}")
+            return False
     
     def remove_user(self, user_id):
         """Remove a user by ID"""
-        with self.user_lock:
-            for i, user in enumerate(self.users):
-                if user["id"] == user_id:
-                    removed_user = self.users.pop(i)
-                    
-                    # Remove face encoding file
-                    encoding_file = os.path.join(self.face_data_dir, f"user_{user_id}_encoding.npy")
-                    if os.path.exists(encoding_file):
-                        os.remove(encoding_file)
-                    
-                    # Remove user image if it exists
-                    user_image = os.path.join(self.face_data_dir, f"user_{user_id}.jpg")
-                    if os.path.exists(user_image):
-                        os.remove(user_image)
-                    
-                    self.save_users()
-                    logger.info(f"User {removed_user['name']} removed successfully")
-                    return True
-        
-        logger.warning(f"No user found with ID {user_id}")
-        return False
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Get user name first for logging
+            cursor.execute("SELECT name FROM users WHERE id = ?", (user_id,))
+            user = cursor.fetchone()
+            
+            if not user:
+                logger.warning(f"No user found with ID {user_id}")
+                conn.close()
+                return False
+            
+            user_name = user[0]
+            
+            # Delete conversation logs for this user
+            cursor.execute("DELETE FROM conversation_logs WHERE user_id = ?", (user_id,))
+            
+            # Delete the user
+            cursor.execute("DELETE FROM users WHERE id = ?", (user_id,))
+            
+            conn.commit()
+            conn.close()
+            
+            # Remove user image if it exists
+            user_image = os.path.join(self.face_data_dir, f"user_{user_id}.jpg")
+            if os.path.exists(user_image):
+                os.remove(user_image)
+            
+            logger.info(f"User {user_name} removed successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error removing user: {e}")
+            return False
     
     def list_users(self):
-        """Return a list of all users"""
-        # Create a copy of users without the face_encoding field
+        """Return a list of all users without face encoding data"""
         user_list = []
-        for user in self.users:
-            user_copy = user.copy()
-            if 'face_encoding' in user_copy:
-                del user_copy['face_encoding']
-            user_list.append(user_copy)
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute("SELECT id, name, created, last_seen FROM users")
+            rows = cursor.fetchall()
+            
+            for row in rows:
+                user_id, name, created, last_seen = row
+                user = {
+                    "id": user_id,
+                    "name": name,
+                    "created": created,
+                    "last_seen": last_seen
+                }
+                user_list.append(user)
+            
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error listing users: {e}")
         
         return user_list
     
     def update_user(self, user_id, new_name=None):
         """Update user information"""
-        with self.user_lock:
-            for user in self.users:
-                if user["id"] == user_id:
-                    if new_name:
-                        user["name"] = new_name
-                    self.save_users()
-                    logger.info(f"User {user_id} updated successfully")
-                    return True
-        
-        logger.warning(f"No user found with ID {user_id}")
-        return False
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            # Check if user exists
+            cursor.execute("SELECT id FROM users WHERE id = ?", (user_id,))
+            if not cursor.fetchone():
+                logger.warning(f"No user found with ID {user_id}")
+                conn.close()
+                return False
+            
+            if new_name:
+                cursor.execute("UPDATE users SET name = ? WHERE id = ?", (new_name, user_id))
+            
+            conn.commit()
+            conn.close()
+            
+            logger.info(f"User {user_id} updated successfully")
+            return True
+            
+        except Exception as e:
+            logger.error(f"Error updating user: {e}")
+            return False
     
     def update_face_data(self, user_id):
         """Update the face data for an existing user"""
         logger.info(f"Updating face data for user ID: {user_id}")
         
-        # Find the user
-        target_user = None
-        for user in self.users:
-            if user["id"] == user_id:
-                target_user = user
-                break
-        
-        if not target_user:
-            logger.warning(f"No user found with ID {user_id}")
+        # Check if user exists
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            cursor.execute("SELECT name FROM users WHERE id = ?", (user_id,))
+            user = cursor.fetchone()
+            conn.close()
+            
+            if not user:
+                logger.warning(f"No user found with ID {user_id}")
+                return False
+                
+            user_name = user[0]
+        except Exception as e:
+            logger.error(f"Error checking user existence: {e}")
             return False
         
         # Ensure camera is capturing
@@ -292,21 +375,72 @@ class UserManager:
         # Extract face encoding for the detected face
         face_encoding = face_recognition.face_encodings(rgb_frame, face_locations)[0]
         
-        # Update the user's face encoding
-        with self.user_lock:
-            target_user['face_encoding'] = face_encoding
-            target_user['updated'] = time.time()
-        
-        # Save face encoding to file
-        encoding_file = os.path.join(self.face_data_dir, f"user_{user_id}_encoding.npy")
-        np.save(encoding_file, face_encoding)
+        # Update the user's face encoding in database
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                "UPDATE users SET face_encoding = ? WHERE id = ?", 
+                (pickle.dumps(face_encoding), user_id)
+            )
+            
+            conn.commit()
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error updating face data in database: {e}")
+            return False
         
         # Update user image for reference
         face_top, face_right, face_bottom, face_left = face_locations[0]
         face_image = frame[face_top:face_bottom, face_left:face_right]
         cv2.imwrite(os.path.join(self.face_data_dir, f"user_{user_id}.jpg"), face_image)
         
-        # Save updated user list
-        self.save_users()
-        logger.info(f"Face data updated for user {target_user['name']}")
+        logger.info(f"Face data updated for user {user_name}")
         return True
+    
+    def log_conversation(self, user_id, command, response):
+        """Log a conversation entry for a user"""
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                "INSERT INTO conversation_logs (user_id, timestamp, command, response) VALUES (?, ?, ?, ?)",
+                (user_id, time.time(), command, response)
+            )
+            
+            conn.commit()
+            conn.close()
+            logger.debug(f"Logged conversation for user {user_id}")
+            return True
+        except Exception as e:
+            logger.error(f"Error logging conversation: {e}")
+            return False
+    
+    def get_conversation_history(self, user_id, limit=10):
+        """Get recent conversation history for a user"""
+        history = []
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cursor = conn.cursor()
+            
+            cursor.execute(
+                "SELECT timestamp, command, response FROM conversation_logs WHERE user_id = ? ORDER BY timestamp DESC LIMIT ?", 
+                (user_id, limit)
+            )
+            
+            rows = cursor.fetchall()
+            for row in rows:
+                timestamp, command, response = row
+                history.append({
+                    "timestamp": timestamp,
+                    "command": command,
+                    "response": response
+                })
+            
+            conn.close()
+        except Exception as e:
+            logger.error(f"Error retrieving conversation history: {e}")
+        
+        return history
