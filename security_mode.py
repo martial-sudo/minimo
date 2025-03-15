@@ -8,7 +8,7 @@ import cv2
 import numpy as np
 
 class SecurityMode:
-    def __init__(self, audio_manager, camera_manager, face_display, user_manager, power_manager, video_source=0):
+    def __init__(self, audio_manager, camera_manager, face_display, user_manager, power_manager, ip_camera_url):
         """Initialize the night-time security mode with intruder detection."""
         self.audio_manager = audio_manager
         self.camera_manager = camera_manager
@@ -25,9 +25,11 @@ class SecurityMode:
         self.logger = logging.getLogger('security_mode')
         self.recordings_dir = "security_recordings"
         self.shutdown_event = threading.Event()
+
+        self.ip_camera_url = ip_camera_url  # IP camera URL
         
         # Intruder detection specific attributes
-        self.video_source = video_source
+        
         self.cap = None
         self.background_subtractor = None
         self.MIN_AREA = 5000  # Match the value from intruder_2.py
@@ -314,12 +316,12 @@ class SecurityMode:
     
     # Intruder detection specific methods
     def start_intruder_detection(self):
-        """Start continuous intruder detection in a separate thread."""
+        """Start continuous intruder detection using the IP camera."""
         if not self.intruder_detection_active:
             self.intruder_detection_active = True
             self.intruder_thread = threading.Thread(target=self._run_intruder_detection, daemon=True)
             self.intruder_thread.start()
-            self.logger.info("Continuous intruder detection started")
+            self.logger.info("Continuous intruder detection started using IP camera")
     
     def stop_intruder_detection(self):
         """Stop the intruder detection thread."""
@@ -461,9 +463,9 @@ class SecurityMode:
         """Run intruder detection using OpenCV."""
         try:
             # Initialize video capture - match the approach from intruder_2.py
-            if isinstance(self.video_source, str):
+            if isinstance(self.ip_camera_url, str):
                 # Use a video file if specified
-                self.cap = cv2.VideoCapture(self.video_source)
+                self.cap = cv2.VideoCapture(self.ip_camera_url)
                 if not self.cap.isOpened():
                     self.logger.error("Error: Unable to access the video source.")
                     return

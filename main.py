@@ -141,6 +141,7 @@ class AssistantSystem:
             self.face_display,
             self.user_manager,
             self.power_manager
+                ip_camera_url="http://192.168.1.100:8080/video"  # ipcameraurl
         )
         
         # Set up event handlers
