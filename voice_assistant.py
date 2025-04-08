@@ -62,7 +62,7 @@ class VoiceAssistant:
             current_time = datetime.datetime.now().strftime("%I:%M %p")
             self.speak(f"The current time is {current_time}")
         elif "name" in command:
-            self.speak("My name is kannettan")
+            self.speak("My name is Minimo")
         elif "joke" in command:
             jokes = [
                 "Why don’t skeletons fight each other? Because they don’t have the guts!",
